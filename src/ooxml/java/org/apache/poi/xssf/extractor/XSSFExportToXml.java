@@ -18,7 +18,10 @@
 package org.apache.poi.xssf.extractor;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.Reader;
+import java.io.StringReader;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Collections;
@@ -29,6 +32,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Vector;
 
+import javax.xml.XMLConstants;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.OutputKeys;
 import javax.xml.transform.Source;
@@ -59,6 +63,8 @@ import org.w3c.dom.Element;
 import org.w3c.dom.NamedNodeMap;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
+import org.w3c.dom.ls.LSInput;
+import org.w3c.dom.ls.LSResourceResolver;
 import org.xml.sax.SAXException;
 
 /**
@@ -242,9 +248,13 @@ public class XSSFExportToXml implements Comparator<String>{
      * @return true, if document is valid
      */
     private boolean isValid(Document xml) throws SAXException{
-        try{
+        try {
             String language = "http://www.w3.org/2001/XMLSchema";
             SchemaFactory factory = SchemaFactory.newInstance(language);
+            trySetFeature(factory, XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            // secure processing only denies access to external schemas/DTDs on JDK 8+,
+            // so never load any resource referenced by the embedded schema
+            factory.setResourceResolver(new ExternalResourceBlocker());
 
             Source source = new DOMSource(map.getSchema());
             Schema schema = factory.newSchema(source);
@@ -523,5 +533,129 @@ public class XSSFExportToXml implements Comparator<String>{
             }
         }
         return complexTypeNode;
+    }
+
+    private static void trySetFeature(SchemaFactory sf, String feature, boolean enabled) {
+        try {
+            sf.setFeature(feature, enabled);
+        } catch (Exception e) {
+            LOG.log(POILogger.WARN, "SchemaFactory Feature unsupported", feature, e);
+        } catch (AbstractMethodError ame) {
+            LOG.log(POILogger.WARN, "Cannot set SchemaFactory feature because outdated XML parser in classpath", feature, ame);
+        }
+    }
+
+    /**
+     * The XML Schema of a mapping is embedded in the workbook, so any resource it
+     * references (xs:import / xs:include / xs:redefine schema locations, DTDs, ...)
+     * is replaced by an empty document instead of being loaded from its location.
+     */
+    static final class ExternalResourceBlocker implements LSResourceResolver {
+        @Override
+        public LSInput resolveResource(String type, String namespaceURI, String publicId, String systemId, String baseURI) {
+            if (systemId == null) {
+                // nothing to load, e.g. an xs:import without schemaLocation
+                return null;
+            }
+            LOG.log(POILogger.WARN, "Refusing to load external resource referenced by the XML Schema: ", systemId);
+            return new EmptyLSInput(publicId, systemId, baseURI);
+        }
+    }
+
+    static final class EmptyLSInput implements LSInput {
+        private Reader characterStream = new StringReader("");
+        private InputStream byteStream;
+        private String stringData;
+        private String systemId;
+        private String publicId;
+        private String baseURI;
+        private String encoding;
+        private boolean certifiedText;
+
+        EmptyLSInput(String publicId, String systemId, String baseURI) {
+            this.publicId = publicId;
+            this.systemId = systemId;
+            this.baseURI = baseURI;
+        }
+
+        @Override
+        public Reader getCharacterStream() {
+            return characterStream;
+        }
+
+        @Override
+        public void setCharacterStream(Reader characterStream) {
+            this.characterStream = characterStream;
+        }
+
+        @Override
+        public InputStream getByteStream() {
+            return byteStream;
+        }
+
+        @Override
+        public void setByteStream(InputStream byteStream) {
+            this.byteStream = byteStream;
+        }
+
+        @Override
+        public String getStringData() {
+            return stringData;
+        }
+
+        @Override
+        public void setStringData(String stringData) {
+            this.stringData = stringData;
+        }
+
+        @Override
+        public String getSystemId() {
+            return systemId;
+        }
+
+        @Override
+        public void setSystemId(String systemId) {
+            this.systemId = systemId;
+        }
+
+        @Override
+        public String getPublicId() {
+            return publicId;
+        }
+
+        @Override
+        public void setPublicId(String publicId) {
+            this.publicId = publicId;
+        }
+
+        @Override
+        public String getBaseURI() {
+            return baseURI;
+        }
+
+        @Override
+        public void setBaseURI(String baseURI) {
+            this.baseURI = baseURI;
+        }
+
+        @Override
+        public String getEncoding() {
+            return encoding;
+        }
+
+        @Override
+        public void setEncoding(String encoding) {
+            this.encoding = encoding;
+        }
+
+        @Override
+        public boolean getCertifiedText() {
+            return certifiedText;
+        }
+
+        @Override
+        public void setCertifiedText(boolean certifiedText) {
+            this.certifiedText = certifiedText;
+        }
     }
 }

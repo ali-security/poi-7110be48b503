@@ -19,11 +19,19 @@ package org.apache.poi.xssf.extractor;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.Date;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
@@ -33,15 +41,19 @@ import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.CellType;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.util.TempFile;
 import org.apache.poi.util.XMLHelper;
 import org.apache.poi.xssf.XSSFTestDataSamples;
 import org.apache.poi.xssf.model.MapInfo;
 import org.apache.poi.xssf.usermodel.XSSFMap;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.junit.Test;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 import org.xml.sax.EntityResolver;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
+import org.xml.sax.SAXParseException;
 
 import junit.framework.TestCase;
 
@@ -620,11 +632,132 @@ public final class TestXSSFExportToXML extends TestCase {
            
            assertEquals("2014-12-31", xmlData.split("<DATE>")[1].split("</DATE>")[0].trim());
            assertEquals("12.5", xmlData.split("<REFELEMENT>")[1].split("</REFELEMENT>")[0].trim());
-           
+
            parseXML(xmlData);
-           
+
            found = true;
        }
        assertTrue(found);
    }
+
+    public void testXXEInSchema() throws Exception {
+        XSSFWorkbook wb = XSSFTestDataSamples.openSampleWorkbook("xxe_in_schema.xlsx");
+        try {
+            // exporting a table cell of a non-mapped column fails before the schema validation
+            // (see bug 61281), so drop the empty one in D10
+            Row row = wb.getSheetAt(0).getRow(9);
+            row.removeCell(row.getCell(3));
+
+            for (XSSFMap map : wb.getCustomXMLMappings()) {
+                XSSFExportToXml exporter = new XSSFExportToXml(map);
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                exporter.exportToXML(bos, true);
+            }
+            fail("SAXParseException expected, the schema redefines an external schema");
+        } catch (SAXParseException e) {
+            // expected, the external schema is not loaded
+        } finally {
+            wb.close();
+        }
+    }
+
+    public void testExternalSchemaReferencesAreNotLoaded() throws Exception {
+        final ServerSocket server = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
+        final AtomicInteger requests = new AtomicInteger();
+        Thread listener = new Thread("XXE schema listener") {
+            @Override
+            public void run() {
+                try {
+                    while (true) {
+                        Socket socket = server.accept();
+                        requests.incrementAndGet();
+                        socket.close();
+                    }
+                } catch (IOException e) {
+                    // server socket closed
+                }
+            }
+        };
+        listener.setDaemon(true);
+        listener.start();
+        try {
+            for (String reference : new String[]{"redefine", "include", "import"}) {
+                String location = "http://127.0.0.1:" + server.getLocalPort() + "/" + reference + ".xsd";
+                XSSFWorkbook wb = XSSFTestDataSamples.openSampleWorkbook("CustomXMLMappings.xlsx");
+                try {
+                    XSSFMap map = wb.getCustomXMLMappings().iterator().next();
+                    addSchemaReference(map, reference, location);
+
+                    SAXParseException failure = null;
+                    try {
+                        new XSSFExportToXml(map).exportToXML(new ByteArrayOutputStream(), true);
+                    } catch (SAXParseException e) {
+                        failure = e;
+                    }
+                    assertEquals("xs:" + reference + " must not load " + location, 0, requests.get());
+                    assertNotNull("validation must fail for a schema with an external xs:" + reference, failure);
+                } finally {
+                    wb.close();
+                }
+            }
+        } finally {
+            server.close();
+            listener.join(10000);
+        }
+    }
+
+    public void testLocalSchemaFileIsNotIncluded() throws Exception {
+        File xsd = TempFile.createTempFile("xxe_in_schema", ".xsd");
+        try {
+            OutputStream out = new FileOutputStream(xsd);
+            try {
+                out.write(("<xsd:schema xmlns:xsd=\"" + XMLConstants.W3C_XML_SCHEMA_NS_URI + "\">"
+                        + "<xsd:simpleType name=\"LocalFileType\"><xsd:restriction base=\"xsd:string\"/></xsd:simpleType>"
+                        + "</xsd:schema>").getBytes("UTF-8"));
+            } finally {
+                out.close();
+            }
+
+            XSSFWorkbook wb = XSSFTestDataSamples.openSampleWorkbook("CustomXMLMappings.xlsx");
+            try {
+                XSSFMap map = wb.getCustomXMLMappings().iterator().next();
+                addSchemaReference(map, "include", xsd.toURI().toString());
+
+                // the embedded schema now depends on the local file, so it can only be valid if the file is read
+                NodeList elements = ((Element) map.getSchema()).getElementsByTagNameNS(XMLConstants.W3C_XML_SCHEMA_NS_URI, "element");
+                boolean found = false;
+                for (int i = 0; i < elements.getLength(); i++) {
+                    Element element = (Element) elements.item(i);
+                    if ("NOME".equals(element.getAttribute("name"))) {
+                        element.setAttribute("type", "LocalFileType");
+                        found = true;
+                    }
+                }
+                assertTrue(found);
+
+                try {
+                    new XSSFExportToXml(map).exportToXML(new ByteArrayOutputStream(), true);
+                    fail("the local schema file " + xsd + " must not be included");
+                } catch (SAXParseException e) {
+                    // expected, the local schema file is not loaded
+                }
+            } finally {
+                wb.close();
+            }
+        } finally {
+            xsd.delete();
+        }
+    }
+
+    private static void addSchemaReference(XSSFMap map, String reference, String location) {
+        Element schema = (Element) map.getSchema();
+        String prefix = schema.getPrefix();
+        Element ref = schema.getOwnerDocument().createElementNS(XMLConstants.W3C_XML_SCHEMA_NS_URI,
+                (prefix == null ? "" : prefix + ":") + reference);
+        if ("import".equals(reference)) {
+            ref.setAttribute("namespace", "urn:poi:xxe");
+        }
+        ref.setAttribute("schemaLocation", location);
+        schema.insertBefore(ref, schema.getFirstChild());
+    }
 }
