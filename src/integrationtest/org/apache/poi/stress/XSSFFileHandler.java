@@ -30,6 +30,7 @@ import javax.xml.transform.TransformerException;
 
 import org.apache.poi.POIXMLException;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
+import org.apache.poi.openxml4j.exceptions.InvalidOperationException;
 import org.apache.poi.openxml4j.exceptions.NotOfficeXmlFileException;
 import org.apache.poi.openxml4j.exceptions.OLE2NotOfficeXmlFileException;
 import org.apache.poi.openxml4j.exceptions.OpenXML4JException;
@@ -138,6 +139,8 @@ public class XSSFFileHandler extends SpreadsheetHandler {
         
         // corrupt/invalid
         EXPECTED_ADDITIONAL_FAILURES.add("openxml4j/invalid.xlsx");
+        // zip with duplicate entry names
+        EXPECTED_ADDITIONAL_FAILURES.add("spreadsheet/duplicate-file.xlsx");
     }
 
     @SuppressWarnings("resource")
@@ -168,6 +171,10 @@ public class XSSFFileHandler extends SpreadsheetHandler {
                 throw e;
             }
         } catch (POIXMLException e) {
+            if(!EXPECTED_ADDITIONAL_FAILURES.contains(file.getParentFile().getName() + "/" + file.getName())) {
+                throw e;
+            }
+        } catch (InvalidOperationException e) {
             if(!EXPECTED_ADDITIONAL_FAILURES.contains(file.getParentFile().getName() + "/" + file.getName())) {
                 throw e;
             }
